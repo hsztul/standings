@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MLB Standings</title>
+  <style>
+    /* ==== BASIC RESET & TYPOGRAPHY ==== */
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f9f9f9;
+      color: #333;
+      line-height: 1.4;
+      padding: 0;
+    }
+    h1 {
+      margin: 0;
+      padding: 1rem;
+      font-size: 1.25rem;
+      background-color: #fff;
+      text-align: center;
+      border-bottom: 1px solid #ddd;
+    }
+    /* ==== TAB BAR ==== */
+    .tabs {
+      display: flex;
+      overflow-x: auto;
+      background-color: #fff;
+      border-bottom: 1px solid #ddd;
+    }
+    .tab {
+      flex: 0 0 auto;
+      padding: 0.75rem 1rem;
+      font-size: 0.9rem;
+      color: #555;
+      text-align: center;
+      cursor: pointer;
+      white-space: nowrap;
+      border-bottom: 3px solid transparent;
+    }
+    .tab.active {
+      color: #000;
+      border-bottom-color: #000;
+      font-weight: bold;
+    }
+    /* ==== TABLE STYLE ==== */
+    .standings-container {
+      padding: 0 1rem 2rem;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background-color: #fff;
+      margin-top: 1rem;
+    }
+    th, td {
+      padding: 0.75rem 0.5rem;
+      text-align: left;
+      font-size: 0.9rem;
+      border-bottom: 1px solid #eee;
+    }
+    th {
+      background-color: #fafafa;
+      font-weight: 600;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+    tr:last-child td {
+      border-bottom: none;
+    }
+    /* ==== MOBILE OPTIMIZATION ==== */
+    @media (max-width: 400px) {
+      th, td {
+        font-size: 0.8rem;
+        padding: 0.6rem 0.4rem;
+      }
+      .tab {
+        padding: 0.6rem 0.8rem;
+        font-size: 0.8rem;
+      }
+      h1 {
+        font-size: 1.1rem;
+        padding: 0.8rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <h1>MLB Standings</h1>
+
+  <!-- Division tabs (NL East default) -->
+  <div class="tabs" id="division-tabs">
+    <div class="tab active" data-division="NL East">NL East</div>
+    <div class="tab" data-division="NL Central">NL Central</div>
+    <div class="tab" data-division="NL West">NL West</div>
+    <div class="tab" data-division="AL East">AL East</div>
+    <div class="tab" data-division="AL Central">AL Central</div>
+    <div class="tab" data-division="AL West">AL West</div>
+  </div>
+
+  <!-- Container for the standings table -->
+  <div class="standings-container">
+    <table id="standings-table">
+      <thead>
+        <tr>
+          <th>Team</th>
+          <th>W</th>
+          <th>L</th>
+          <th>PCT</th>
+          <th>GB</th>
+        </tr>
+      </thead>
+      <tbody>
+        <!-- Filled by JavaScript -->
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    // ==== MAP FROM OUR TAB LABEL TO API DIVISION NAME ====
+    const divisionMap = {
+      "NL East":    "National League East",
+      "NL Central": "National League Central",
+      "NL West":    "National League West",
+      "AL East":    "American League East",
+      "AL Central": "American League Central",
+      "AL West":    "American League West"
+    };
+
+    // Determine leagueId based on division
+    function getLeagueId(divisionKey) {
+      return divisionKey.startsWith("NL") ? 104 : 103;
+    }
+
+    // Cache fetched data so we don't refetch on every tab click in the same session
+    const standingsCache = {};
+
+    // Fetch standings from MLB Stats API for a given league (103 = AL, 104 = NL) :contentReference[oaicite:0]{index=0}
+    async function fetchStandings(leagueId) {
+      if (standingsCache[leagueId]) {
+        return standingsCache[leagueId];
+      }
+      const url = `https://statsapi.mlb.com/api/v1/standings?leagueId=${leagueId}`;
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error("Failed to fetch standings");
+      }
+      const json = await response.json();
+      standingsCache[leagueId] = json.records;
+      return json.records;
+    }
+
+    // Render the table rows for one division
+    async function renderDivision(divisionKey) {
+      const tableBody = document.querySelector("#standings-table tbody");
+      tableBody.innerHTML = ""; // clear existing rows
+
+      const apiDivisionName = divisionMap[divisionKey];
+      const leagueId = getLeagueId(divisionKey);
+      try {
+        const records = await fetchStandings(leagueId);
+        // Find the record object whose division.name matches our division
+        const divisionRecord = records.find(
+          rec => rec.division.name === apiDivisionName
+        );
+        if (!divisionRecord) {
+          tableBody.innerHTML = `
+            <tr><td colspan="5" style="text-align:center; padding:1rem;">
+              No data found for ${divisionKey}.
+            </td></tr>`;
+          return;
+        }
+
+        // Build rows for each teamRecords entry
+        divisionRecord.teamRecords.forEach(teamRec => {
+          const { team, wins, losses, leagueRecord, wildCardGamesBack } = teamRec;
+          // gamesBack is in teamRec.gamesBack; if it's "-" for leader, replace with "—"
+          const gamesBack = teamRec.gamesBack === "-" ? "—" : teamRec.gamesBack;
+          const pct = teamRec.pct;
+          const teamName = team.name;
+
+          const row = document.createElement("tr");
+          row.innerHTML = `
+            <td>${teamName}</td>
+            <td>${wins}</td>
+            <td>${losses}</td>
+            <td>${pct}</td>
+            <td>${gamesBack}</td>
+          `;
+          tableBody.appendChild(row);
+        });
+      } catch (err) {
+        tableBody.innerHTML = `
+          <tr><td colspan="5" style="text-align:center; padding:1rem; color:red;">
+            Error loading data.
+          </td></tr>`;
+        console.error(err);
+      }
+    }
+
+    // Handle tab clicks
+    function setupTabs() {
+      const tabs = document.querySelectorAll(".tab");
+      tabs.forEach(tab => {
+        tab.addEventListener("click", async () => {
+          // Deactivate all tabs
+          tabs.forEach(t => t.classList.remove("active"));
+          // Activate clicked tab
+          tab.classList.add("active");
+          // Render corresponding division
+          const divisionKey = tab.getAttribute("data-division");
+          await renderDivision(divisionKey);
+          // Update table header to include league + division
+          document.querySelector("h1").textContent = `MLB Standings: ${divisionKey}`;
+        });
+      });
+    }
+
+    // On initial load, set up tabs and render default (NL East)
+    document.addEventListener("DOMContentLoaded", async () => {
+      setupTabs();
+      await renderDivision("NL East");
+      document.querySelector("h1").textContent = "MLB Standings: NL East";
+    });
+  </script>
+</body>
+</html>
