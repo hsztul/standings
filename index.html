@@ -1,8 +1,8 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>MLB Standings (W/L/PCT/GB/Next Game)</title>
   <style>
     /* ==== RESET + TYPOGRAPHY ==== */
@@ -105,12 +105,12 @@
 
   <!-- Division tabs (NL East default) -->
   <div class="tabs" id="division-tabs">
-    <div class="tab active" data-division="NL East">NL East</div>
-    <div class="tab" data-division="NL Central">NL Central</div>
-    <div class="tab" data-division="NL West">NL West</div>
-    <div class="tab" data-division="AL East">AL East</div>
-    <div class="tab" data-division="AL Central">AL Central</div>
-    <div class="tab" data-division="AL West">AL West</div>
+    <div class="tab active" data-division-id="204" data-division-key="NL East">NL East</div>
+    <div class="tab" data-division-id="205" data-division-key="NL Central">NL Central</div>
+    <div class="tab" data-division-id="203" data-division-key="NL West">NL West</div>
+    <div class="tab" data-division-id="201" data-division-key="AL East">AL East</div>
+    <div class="tab" data-division-id="202" data-division-key="AL Central">AL Central</div>
+    <div class="tab" data-division-id="200" data-division-key="AL West">AL West</div>
   </div>
 
   <!-- Container for the standings table -->
@@ -120,42 +120,40 @@
 
   <script>
     /**
-     * We use the MLB Stats API (same JSON endpoints that mlb.com/standings uses), but now
-     * explicitly add &standingsTypes=regularSeason to avoid missing division records.
+     * We call the MLB Stats API directly, but now match on division.id
+     * since division.name is not returned in the “records” array.
      *
-     * • Standings endpoint:
+     * • Standings endpoint (regular season):
      *   https://statsapi.mlb.com/api/v1/standings?leagueId={leagueId}&standingsTypes=regularSeason
-     *   (leagueId 103 = AL, 104 = NL) :contentReference[oaicite:0]{index=0}
+     *   (leagueId 103 = AL, 104 = NL) 
      *
      * • Schedule endpoint:
      *   https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate={YYYY-MM-DD}&endDate={YYYY-MM-DD}
-     *   (returns all games between those dates, so we can pick each team’s next game) 
+     *   (returns all games in that date range; we pick each team’s next game) 
      *
-     * On each load/tab switch:
-     *   1. Fetch all division records for the league (AL or NL, regular season).
-     *   2. Find the entry whose division.name matches (“National League East,” etc.).
-     *   3. Fetch next 7 days of games, build a {teamId → nextGameString} map.
-     *   4. Build a table with 6 columns: Team │ W │ L │ PCT │ GB │ Next Game.
+     * Flow:
+     *   1) User clicks a tab (e.g. “NL East” → divisionId=204, leagueId=104).
+     *   2) fetchStandingsByLeague(leagueId) → JSON “records” array.
+     *   3) Find record where r.division.id === divisionId.
+     *   4) fetchUpcomingSchedule() → build nextGameByTeamId map.
+     *   5) Build a 6‐column table: Team │ W │ L │ PCT │ GB │ Next Game.
+     *   6) Insert into DOM.
      */
 
-    // Tab label → { leagueId, API’s division.name }
-    const divisionToLeague = {
-      "AL East":    { leagueId: 103, apiDivision: "American League East" },
-      "AL Central": { leagueId: 103, apiDivision: "American League Central" },
-      "AL West":    { leagueId: 103, apiDivision: "American League West" },
-      "NL East":    { leagueId: 104, apiDivision: "National League East" },
-      "NL Central": { leagueId: 104, apiDivision: "National League Central" },
-      "NL West":    { leagueId: 104, apiDivision: "National League West" }
-    };
+    // Map “leagueId” by top‐level league (we infer from divisionId: 200–202 → AL (103); 203–205 → NL (104))
+    function leagueIdForDivisionId(divId) {
+      // 200,201,202 → AL; 203,204,205 → NL
+      return divId >= 203 ? 104 : 103;
+    }
 
-    // Cache fetched standings (per leagueId)
+    // Cache the “records” array per leagueId
     const standingsCache = {};
-    // Cache fetched schedule (per date‐range key)
+    // Cache the schedule (today → 7 days) per date‐range
     const scheduleCache = {};
 
     /**
-     * 1. Fetch standings for a given leagueId (103 or 104), specifying regularSeason.
-     *    Response JSON has “records” (one per division). We store in standingsCache.
+     * Fetch “records” for a given leagueId, specifying regularSeason.
+     * Stores the entire records[] in standingsCache[leagueId].
      */
     async function fetchStandingsByLeague(leagueId) {
       if (standingsCache[leagueId]) {
@@ -170,13 +168,13 @@
         throw new Error("Failed to fetch standings");
       }
       const json = await resp.json();
-      standingsCache[leagueId] = json.records;
+      standingsCache[leagueId] = json.records; // an array of division‐level objects
       return json.records;
     }
 
     /**
-     * 2. Fetch all MLB games from today → 7 days from now (sportId=1).
-     *    Response JSON has “dates” → each contains “games”[]. We flatten to one array.
+     * Fetch all MLB games from today → 7 days from now (sportId=1).
+     * Store flattened list of game objects in scheduleCache.
      */
     async function fetchUpcomingSchedule() {
       const todayObj = new Date();
@@ -207,16 +205,15 @@
         throw new Error("Failed to fetch schedule");
       }
       const json = await resp.json();
-      // Flatten all “games” arrays from each date into one array
+      // Flatten all “games” across dates:
       const allGames = (json.dates || []).flatMap(d => d.games || []);
       scheduleCache[cacheKey] = allGames;
       return allGames;
     }
 
     /**
-     * 3. Build a lookup map: teamId → { display: "Jun 05 7:05 PM @ Opponent", rawDate: timestamp }
-     *    Sort all games by gameDateTime (ascending). For each game, if teamId not yet in map,
-     *    record this game as that team’s next game.
+     * Build a lookup: nextGameByTeam[teamId] = { display: "Jun 05 7:05 PM @ Opponent", rawDate }
+     * Sort all games by UTC time, then assign the earliest to each team.
      */
     async function buildNextGameMap() {
       const allGames = await fetchUpcomingSchedule();
@@ -225,11 +222,13 @@
       const nextGameByTeam = {};
       allGames.forEach(game => {
         const utcTime = new Date(game.gameDateTime);
+        // Format date like “Jun 05”:
         const dateStr = utcTime.toLocaleDateString("en-US", {
           month: "short",
           day: "2-digit",
           timeZone: "UTC"
         });
+        // Format “ET” time like “7:05 PM”:
         const timeStr = utcTime.toLocaleTimeString("en-US", {
           hour: "numeric",
           minute: "2-digit",
@@ -258,31 +257,30 @@
     }
 
     /**
-     * 4. Render one division’s table (e.g., "NL East"):
-     *    • Fetch records for that league + regular season
-     *    • Find record where division.name === apiDivision
-     *    • Build Next Game map
-     *    • For each teamRecord, extract team.name, wins, losses, pct, gamesBack, nextGame
-     *    • Build a 6‐column HTML table: Team │ W │ L │ PCT │ GB │ Next Game
+     * Render a division’s standings table into the DOM.
+     * divisionId (e.g. 204 = NL East). We derive leagueId via leagueIdForDivisionId.
      */
-    async function renderDivision(divisionKey) {
+    async function renderDivision(divisionId, divisionKey) {
       const container = document.getElementById("standings-container");
       container.innerHTML = `<div class="loading">Loading ${divisionKey}…</div>`;
 
       try {
-        const { leagueId, apiDivision } = divisionToLeague[divisionKey];
-        // Fetch regular‐season standings for this league
+        // 1) Determine leagueId (103 or 104) from divisionId
+        const leagueId = leagueIdForDivisionId(divId);
+
+        // 2) Fetch all division‐level “records” for that league
         const records = await fetchStandingsByLeague(leagueId);
-        const divRecord = records.find(r => r.division.name === apiDivision);
-        console.log("🔎 records:", records, divRecord);
+
+        // 3) Find the one record where r.division.id === divisionId
+        const divRecord = records.find(r => r.division.id === divisionId);
         if (!divRecord) {
           throw new Error(`No standings found for "${divisionKey}".`);
         }
 
-        // Build next‐game map (teamId → “Jun 05 7:05 PM @ Opponent”)
+        // 4) Build nextGameMap (teamId → “Jun 05 7:05 PM @ Opponent”)
         const nextGameMap = await buildNextGameMap();
 
-        // Build rows array
+        // 5) Build an array of rows: { teamName, wins, losses, pct, gb, nextGame }
         const rows = divRecord.teamRecords.map(tr => {
           const t = tr.team;
           const wins = tr.wins;
@@ -300,7 +298,7 @@
           };
         });
 
-        // Construct the HTML <table>
+        // 6) Build and insert the HTML table
         const table = document.createElement("table");
         const thead = document.createElement("thead");
         thead.innerHTML = `
@@ -332,18 +330,15 @@
 
         container.innerHTML = "";
         container.appendChild(table);
-
       } catch (err) {
         console.error(err);
-        container.innerHTML = `<div class="error">Error loading data for ${divisionKey}.</div>`;
+        container.innerHTML = `<div class="error">Error loading ${divisionKey}.</div>`;
       }
     }
 
     /**
-     * 5. Wire up tab clicks:
-     *    • Remove “active” from all tabs, add it on clicked tab
-     *    • Update <h1> to reflect division
-     *    • Call renderDivision(...) for that tab’s divisionKey
+     * Wire up tab clicks. Each .tab has attributes:
+     *   data-division-id (e.g. "204") and data-division-key (e.g. "NL East")
      */
     function setupTabs() {
       const tabs = document.querySelectorAll(".tab");
@@ -351,17 +346,18 @@
         tab.addEventListener("click", () => {
           tabs.forEach(t => t.classList.remove("active"));
           tab.classList.add("active");
-          const divisionKey = tab.getAttribute("data-division");
+          const divisionId = parseInt(tab.getAttribute("data-division-id"), 10);
+          const divisionKey = tab.getAttribute("data-division-key");
           document.querySelector("h1").textContent = `MLB Standings: ${divisionKey}`;
-          renderDivision(divisionKey);
+          renderDivision(divisionId, divisionKey);
         });
       });
     }
 
-    // On initial load, set up tabs and show NL East by default
+    // On initial load: show NL East (divisionId = 204)
     document.addEventListener("DOMContentLoaded", () => {
       setupTabs();
-      renderDivision("NL East");
+      renderDivision(204, "NL East");
     });
   </script>
 </body>
