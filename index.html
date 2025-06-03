@@ -84,11 +84,15 @@
         padding: 0.8rem;
       }
     }
-    /* ==== LOADING STATE ==== */
-    .loading {
+    /* ==== LOADING & ERROR STATES ==== */
+    .loading,
+    .error {
       text-align: center;
       padding: 1.5rem;
       color: #666;
+    }
+    .error {
+      color: #c00;
     }
   </style>
 </head>
@@ -105,75 +109,85 @@
     <div class="tab" data-division="AL West">AL West</div>
   </div>
 
-  <!-- Container for the standings table or loading message -->
+  <!-- Container for the standings table or loading/error message -->
   <div class="standings-container" id="standings-container">
     <div class="loading">Loading standings…</div>
   </div>
 
   <script>
-    // Proxying through AllOrigins to avoid CORS errors
+    // We’ll route through AllOrigins as a public CORS proxy
     const PROXY_URL = "https://api.allorigins.win/raw?url=";
     const BBREF_URL = "https://www.baseball-reference.com/leagues/MLB-standings.shtml";
 
-    // Mapping tab labels to exactly‐matching captions in Baseball‐Reference tables
-    const divisionMap = {
-      "NL East":    "NL East",
-      "NL Central": "NL Central",
-      "NL West":    "NL West",
-      "AL East":    "AL East",
-      "AL Central": "AL Central",
-      "AL West":    "AL West"
+    // All six divisions in the order they appear on BBRef’s “sortable stats_table” list:
+    //   0 → AL East
+    //   1 → AL Central
+    //   2 → AL West
+    //   3 → NL East
+    //   4 → NL Central
+    //   5 → NL West
+    const divisionTableIndex = {
+      "AL East": 0,
+      "AL Central": 1,
+      "AL West": 2,
+      "NL East": 3,
+      "NL Central": 4,
+      "NL West": 5
     };
 
-    // Cache full scraped HTML text so multiple tab clicks don’t re‐fetch
+    // Cache the raw HTML so multiple tab‐clicks don’t re‐fetch
     let htmlCache = null;
 
     /**
-     * Fetches the Baseball-Reference standings page (via proxy), returning raw HTML text.
+     * Fetch the full HTML of Baseball-Reference’s standings page (via proxy).
+     * Returns a string of HTML.
      */
     async function fetchStandingsPage() {
       if (htmlCache !== null) {
         return htmlCache;
       }
-      const resp = await fetch(PROXY_URL + encodeURIComponent(BBREF_URL));
-      if (!resp.ok) {
+      const res = await fetch(PROXY_URL + encodeURIComponent(BBREF_URL));
+      if (!res.ok) {
         throw new Error("Failed to fetch Baseball-Reference standings page.");
       }
-      htmlCache = await resp.text();
+      htmlCache = await res.text();
       return htmlCache;
     }
 
     /**
-     * Extracts the plain table rows for a given division (e.g. "NL East") by:
-     *  1. Parsing the full HTML into a DOM.
-     *  2. Finding the <table> whose <caption> exactly matches the division name.
-     *  3. Iterating its <tbody><tr> entries, pulling out Team, W, L, PCT, GB.
+     * Given a divisionKey (e.g. "NL East"), parse the cached HTML, pick the
+     * correct table by index, and return an array of rows:
+     *   [{ team, wins, losses, pct, gb }, … ]
+     *
+     * We find <table> elements that have both “sortable” and “stats_table” classes,
+     * then pick the one at divisionTableIndex[divisionKey].
      */
     async function getDivisionData(divisionKey) {
       const rawHtml = await fetchStandingsPage();
-      // Parse into a temporary document
       const parser = new DOMParser();
       const doc = parser.parseFromString(rawHtml, "text/html");
 
-      // Find the table whose caption text is exactly e.g. "NL East"
-      const tables = Array.from(doc.querySelectorAll("table"));
-      const targetTable = tables.find(tbl => {
-        const caption = tbl.querySelector("caption");
-        return caption && caption.textContent.trim() === divisionMap[divisionKey];
-      });
+      // Grab ALL tables with class="sortable stats_table"
+      const allTables = Array.from(doc.querySelectorAll("table.sortable.stats_table"));
+      const idx = divisionTableIndex[divisionKey];
 
-      if (!targetTable) {
-        throw new Error(`Could not find table for division "${divisionKey}".`);
+      if (idx == null || idx >= allTables.length) {
+        throw new Error(`Could not find table index for division "${divisionKey}".`);
       }
 
-      // Build a plain array of rows with only the columns we need
-      const rows = Array.from(targetTable.querySelectorAll("tbody tr"));
-      const data = rows.map(row => {
-        // Team name is in <th data-stat="team_ID">
+      const table = allTables[idx];
+      if (!table) {
+        throw new Error(`Table element missing at index ${idx}.`);
+      }
+
+      // Now extract each <tbody><tr> row for that division
+      const rows = Array.from(table.querySelectorAll("tbody tr"));
+      return rows.map(row => {
+        // Team name lives in <th data-stat="team_ID">
         const teamCell = row.querySelector("th[data-stat='team_ID']");
         const team = teamCell ? teamCell.textContent.trim() : "";
 
-        // Other stats are in <td data-stat="W">, "L", "W_pct", "GB"
+        // The other stats:
         const wins = row.querySelector("td[data-stat='W']")?.textContent.trim() || "";
         const losses = row.querySelector("td[data-stat='L']")?.textContent.trim() || "";
         const pct = row.querySelector("td[data-stat='W_pct']")?.textContent.trim() || "";
@@ -181,12 +195,10 @@
 
         return { team, wins, losses, pct, gb };
       });
-
-      return data;
     }
 
     /**
-     * Renders a simple table (Team | W | L | PCT | GB) into #standings-container.
+     * Render the standings for a given divisionKey into the #standings-container.
      */
     async function renderDivision(divisionKey) {
       const container = document.getElementById("standings-container");
@@ -194,7 +206,8 @@
 
       try {
         const data = await getDivisionData(divisionKey);
-        // Build table markup
+
+        // Build a minimal <table> with only 5 columns: Team | W | L | PCT | GB
         const table = document.createElement("table");
         const thead = document.createElement("thead");
         thead.innerHTML = `
@@ -222,30 +235,24 @@
         });
         table.appendChild(tbody);
 
-        // Replace container content with the new table
         container.innerHTML = "";
         container.appendChild(table);
       } catch (err) {
         console.error(err);
-        container.innerHTML = `
-          <div style="text-align:center; padding:1rem; color:red;">
-            Error loading standings for ${divisionKey}.
-          </div>
-        `;
+        container.innerHTML = `<div class="error">Error loading standings for ${divisionKey}.</div>`;
       }
     }
 
     /**
-     * Set up click handlers on the tabs so that clicking one:
-     *  1. Toggles the "active" class.
-     *  2. Calls renderDivision(...) for that division.
-     *  3. Updates the <h1> to include the division name.
+     * Set up click handlers on each tab: 
+     *   • mark it active
+     *   • update the <h1>
+     *   • call renderDivision(...)
      */
     function setupTabs() {
       const tabs = document.querySelectorAll(".tab");
       tabs.forEach(tab => {
         tab.addEventListener("click", () => {
-          // Deactivate all tabs, activate this one
           tabs.forEach(t => t.classList.remove("active"));
           tab.classList.add("active");
 
@@ -256,7 +263,7 @@
       });
     }
 
-    // On page load, initialize tabs and show NL East
+    // On page load, initialize tabs and show NL East by default
     document.addEventListener("DOMContentLoaded", () => {
       setupTabs();
       renderDivision("NL East");
@@ -264,3 +271,4 @@
   </script>
 </body>
 </html>
+
