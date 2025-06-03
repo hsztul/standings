@@ -274,6 +274,7 @@
         // Fetch regular‐season standings for this league
         const records = await fetchStandingsByLeague(leagueId);
         const divRecord = records.find(r => r.division.name === apiDivision);
+        console.log("🔎 records:", records, divRecord);
         if (!divRecord) {
           throw new Error(`No standings found for "${divisionKey}".`);
         }
