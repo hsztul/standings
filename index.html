@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>MLB Standings (BBRef)</title>
+  <title>mlb_standings</title>
   <style>
-    /* ==== RESET & TYPOGRAPHY ==== */
+    /* ==== RESET & BASIC TYPOGRAPHY ==== */
     body {
       margin: 0;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -111,94 +111,128 @@
 
   <!-- Container for the standings table or loading/error message -->
   <div class="standings-container" id="standings-container">
-    <div class="loading">Loading standings…</div>
+    <div class="loading">Loading NL East…</div>
   </div>
 
   <script>
-    // We’ll route through AllOrigins as a public CORS proxy
-    const PROXY_URL = "https://api.allorigins.win/raw?url=";
-    const BBREF_URL = "https://www.baseball-reference.com/leagues/MLB-standings.shtml";
+    // We’ll route through a public CORS proxy so we can fetch the MLB.com page from any static host
+    const PROXY_URL   = "https://api.allorigins.win/raw?url=";
+    const MLB_URL     = "https://www.mlb.com/standings/";
 
-    // All six divisions in the order they appear on BBRef’s “sortable stats_table” list:
-    //   0 → AL East
-    //   1 → AL Central
-    //   2 → AL West
-    //   3 → NL East
-    //   4 → NL Central
-    //   5 → NL West
-    const divisionTableIndex = {
-      "AL East": 0,
-      "AL Central": 1,
-      "AL West": 2,
-      "NL East": 3,
-      "NL Central": 4,
-      "NL West": 5
-    };
+    // Exact division names as they appear in MLB.com’s plain-text (after stripping tags):
+    const DIVISIONS = [
+      "AL East",
+      "AL Central",
+      "AL West",
+      "NL East",
+      "NL Central",
+      "NL West"
+    ];
 
-    // Cache the raw HTML so multiple tab‐clicks don’t re‐fetch
+    // Cache the raw HTML string (so clicking tabs repeatedly doesn't re-fetch)
     let htmlCache = null;
 
     /**
-     * Fetch the full HTML of Baseball-Reference’s standings page (via proxy).
-     * Returns a string of HTML.
+     * 1) Fetches the entire MLB.com/standings page (via proxy).
+     * 2) Caches the result in `htmlCache` and returns raw HTML text.
      */
     async function fetchStandingsPage() {
       if (htmlCache !== null) {
         return htmlCache;
       }
-      const res = await fetch(PROXY_URL + encodeURIComponent(BBREF_URL));
-      if (!res.ok) {
-        throw new Error("Failed to fetch Baseball-Reference standings page.");
+      const resp = await fetch(PROXY_URL + encodeURIComponent(MLB_URL));
+      if (!resp.ok) {
+        throw new Error("Failed to fetch MLB.com standings page.");
       }
-      htmlCache = await res.text();
+      htmlCache = await resp.text();
       return htmlCache;
     }
 
     /**
-     * Given a divisionKey (e.g. "NL East"), parse the cached HTML, pick the
-     * correct table by index, and return an array of rows:
-     *   [{ team, wins, losses, pct, gb }, … ]
+     * Parses out W, L, PCT, GB, and Next Game for the specified divisionKey.
      *
-     * We find <table> elements that have both “sortable” and “stats_table” classes,
-     * then pick the one at divisionTableIndex[divisionKey].
+     * Strategy (:contentReference[oaicite:0]{index=0}):
+     *  • Load the full HTML, run it through a DOMParser.
+     *  • Grab `doc.body.textContent`, split by newline, trim & filter empty lines.
+     *  • Find the index of the line that exactly equals e.g. “NL East”.
+     *  • Find where the next division header appears (or end of list).
+     *  • In between, skip the column‐header line(s) (those containing “W L PCT GB”).
+     *  • What remains are chunks of three lines per team:
+     *      [team name] → [stats line, from which we take wins, losses, pct, gb] → [next game line].
+     *  • Build an array of objects `{team, wins, losses, pct, gb, nextGame}`.
      */
     async function getDivisionData(divisionKey) {
       const rawHtml = await fetchStandingsPage();
+      // Parse into a temporary document just to extract plain text
       const parser = new DOMParser();
       const doc = parser.parseFromString(rawHtml, "text/html");
+      const allText = doc.body.textContent || "";
+      // Split on newlines and clean up
+      const lines = allText
+        .split("\n")
+        .map(l => l.trim())
+        .filter(l => l !== "");
 
-      // Grab ALL tables with class="sortable stats_table"
-      const allTables = Array.from(doc.querySelectorAll("table.sortable.stats_table"));
-      const idx = divisionTableIndex[divisionKey];
+      // 1) Locate the exact line “divisionKey” (e.g. “NL East”)
+      const startIdx = lines.indexOf(divisionKey);
+      if (startIdx < 0) {
+        throw new Error(`Could not find division header “${divisionKey}” in scraped text.`);
+      }
+      // 2) Find where the next division header appears (or end)
+      let endIdx = lines.length;
+      for (let i = startIdx + 1; i < lines.length; i++) {
+        if (DIVISIONS.includes(lines[i])) {
+          endIdx = i;
+          break;
+        }
+      }
+      // 3) Extract that slice; skip the very first line (which is “NL East”), so slice from startIdx+1
+      const rawSection = lines.slice(startIdx + 1, endIdx);
 
-      if (idx == null || idx >= allTables.length) {
-        throw new Error(`Could not find table index for division "${divisionKey}".`);
+      // 4) Filter out any line that looks like the column‐header:
+      //    those will always contain “W L PCT GB”
+      const filtered = rawSection.filter(line => !/W\s+L\s+PCT\s+GB/.test(line));
+
+      // 5) Now, “filtered” should look like:
+      //    [
+      //      "New York Yankees",
+      //      "36 22 .621 -- …",     ← stats line
+      //      "Jun 3 vs. CLE",       ← next game
+      //      "Toronto Blue Jays",
+      //      "31 28 .525 5.5 …",
+      //      "Jun 3 vs. PHI",
+      //      …
+      //    ]
+      //    i.e. 3 lines per team. We’ll parse every 3‐line group.
+      const result = [];
+      for (let i = 0; i + 2 < filtered.length; i += 3) {
+        const teamName   = filtered[i];
+        const statsLine  = filtered[i + 1];
+        const nextGame   = filtered[i + 2];
+
+        // Split statsLine on whitespace; first 4 tokens are W, L, PCT, GB
+        const statsTokens = statsLine.split(/\s+/);
+        const wins  = statsTokens[0] || "";
+        const losses= statsTokens[1] || "";
+        const pct   = statsTokens[2] || "";
+        const gb    = statsTokens[3] || "";
+
+        result.push({
+          team: teamName,
+          wins,
+          losses,
+          pct,
+          gb,
+          nextGame
+        });
       }
 
-      const table = allTables[idx];
-      if (!table) {
-        throw new Error(`Table element missing at index ${idx}.`);
-      }
-
-      // Now extract each <tbody><tr> row for that division
-      const rows = Array.from(table.querySelectorAll("tbody tr"));
-      return rows.map(row => {
-        // Team name lives in <th data-stat="team_ID">
-        const teamCell = row.querySelector("th[data-stat='team_ID']");
-        const team = teamCell ? teamCell.textContent.trim() : "";
-
-        // The other stats:
-        const wins = row.querySelector("td[data-stat='W']")?.textContent.trim() || "";
-        const losses = row.querySelector("td[data-stat='L']")?.textContent.trim() || "";
-        const pct = row.querySelector("td[data-stat='W_pct']")?.textContent.trim() || "";
-        const gb = row.querySelector("td[data-stat='GB']")?.textContent.trim() || "";
-
-        return { team, wins, losses, pct, gb };
-      });
+      return result;
     }
 
     /**
-     * Render the standings for a given divisionKey into the #standings-container.
+     * Renders one division’s data into a simple 6‐column table:
+     *   Team │ W │ L │ PCT │ GB │ Next Game
      */
     async function renderDivision(divisionKey) {
       const container = document.getElementById("standings-container");
@@ -207,7 +241,7 @@
       try {
         const data = await getDivisionData(divisionKey);
 
-        // Build a minimal <table> with only 5 columns: Team | W | L | PCT | GB
+        // Build a minimal <table>
         const table = document.createElement("table");
         const thead = document.createElement("thead");
         thead.innerHTML = `
@@ -217,6 +251,7 @@
             <th>L</th>
             <th>PCT</th>
             <th>GB</th>
+            <th>Next Game</th>
           </tr>
         `;
         table.appendChild(thead);
@@ -230,11 +265,13 @@
             <td>${row.losses}</td>
             <td>${row.pct}</td>
             <td>${row.gb}</td>
+            <td>${row.nextGame}</td>
           `;
           tbody.appendChild(tr);
         });
         table.appendChild(tbody);
 
+        // Replace container’s content
         container.innerHTML = "";
         container.appendChild(table);
       } catch (err) {
@@ -244,10 +281,10 @@
     }
 
     /**
-     * Set up click handlers on each tab: 
-     *   • mark it active
-     *   • update the <h1>
-     *   • call renderDivision(...)
+     * Set up click handlers on each tab:
+     *   • Toggle the “active” class
+     *   • Update the <h1> to show “MLB Standings: [Division]”
+     *   • Call renderDivision(...)
      */
     function setupTabs() {
       const tabs = document.querySelectorAll(".tab");
@@ -263,7 +300,7 @@
       });
     }
 
-    // On page load, initialize tabs and show NL East by default
+    // On initial load, show NL East by default
     document.addEventListener("DOMContentLoaded", () => {
       setupTabs();
       renderDivision("NL East");
@@ -271,4 +308,3 @@
   </script>
 </body>
 </html>
-
