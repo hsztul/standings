@@ -122,17 +122,17 @@
     /**
      * We’ll use the official MLB Stats API (which powers mlb.com/standings).
      * – Standings endpoint:  https://statsapi.mlb.com/api/v1/standings?leagueId={leagueId}
-     *   (leagueId 103 = AL, 104 = NL) 
+     *   (leagueId 103 = AL, 104 = NL) :contentReference[oaicite:0]{index=0}
      * – Schedule endpoint:   https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate={YYYY-MM-DD}&endDate={YYYY-MM-DD}
-     *   (returns every game between those dates) :contentReference[oaicite:1]{index=1}
+     *   (returns games in that date range) 
      *
      * To get “Next Game” for each team, we:
      *   1. Fetch standings for an entire league (AL or NL). 
      *   2. Fetch that league’s schedule for the upcoming 7 days.
-     *   3. For each team in standings, pick the earliest game in the schedule where that team appears.
+     *   3. For each team in standings, pick the earliest game in which they appear.
      */
 
-    // Map tab labels → “leagueId” + “divisionName”
+    // Map tab labels → { leagueId, apiDivisionName }
     const divisionToLeague = {
       "AL East":    { leagueId: 103, apiDivision: "American League East" },
       "AL Central": { leagueId: 103, apiDivision: "American League Central" },
@@ -142,21 +142,22 @@
       "NL West":    { leagueId: 104, apiDivision: "National League West" }
     };
 
-    // Cache standings JSON (per leagueId)
+    // Cache standings JSON (keyed by leagueId)
     const standingsCache = {};
 
-    // Cache schedule JSON (per leagueId & date‐range)
+    // Cache schedule JSON (keyed by date-range string)
     const scheduleCache = {};
 
     /**
-     * Fetch standings for a given league (103 or 104). 
-     * Returns the full array of “records” (one per division).
+     * 1) Fetch standings for a given leagueId (103 or 104).
+     *    We DROP “&season=2025,” so the API uses the current season automatically.
+     *    Response JSON has a “records” array (one element per division).
      */
     async function fetchStandingsByLeague(leagueId) {
       if (standingsCache[leagueId]) {
         return standingsCache[leagueId];
       }
-      const url = `https://statsapi.mlb.com/api/v1/standings?leagueId=${leagueId}&season=2025`;
+      const url = `https://statsapi.mlb.com/api/v1/standings?leagueId=${leagueId}`;
       const resp = await fetch(url);
       if (!resp.ok) throw new Error("Failed to fetch standings");
       const json = await resp.json();
@@ -165,11 +166,10 @@
     }
 
     /**
-     * Fetch schedule for sportId=1 (MLB) from today → 7 days out.
-     * Returns array of game objects.
+     * 2) Fetch all MLB games from today → 7 days from now.
+     *    We build date strings dynamically in “YYYY-MM-DD” format.
      */
     async function fetchUpcomingSchedule() {
-      // Build date strings: today, plus 7 days
       const todayObj = new Date();
       const yyyy = todayObj.getFullYear();
       const mm = String(todayObj.getMonth() + 1).padStart(2, "0");
@@ -192,50 +192,45 @@
       const resp = await fetch(url);
       if (!resp.ok) throw new Error("Failed to fetch schedule");
       const json = await resp.json();
-      // Flatten all game objects across all dates:
+      // Combine all “games[]” arrays from each date into one big array
       const games = (json.dates || []).flatMap(d => d.games || []);
       scheduleCache[cacheKey] = games;
       return games;
     }
 
     /**
-     * Build a “nextGameByTeamId” map:
-     *   { [teamId]: {opponentName, isHome:boolean, dateStr:"YYYY-MM-DD", timeStr:"HH:MM ET" } }
+     * Build a lookup: nextGameByTeamId → { display: “MMM DD @/vs. Opponent”, rawDate }
+     * We sort each game by gameDateTime ascending, then assign the earliest game
+     * to both its home and away team IDs (if not already assigned).
      */
     async function buildNextGameMap() {
       const allGames = await fetchUpcomingSchedule();
-      // For each teamId, find the earliest game in the next 7 days
-      // Sort by gameDate ascending, then pick first per team
-      allGames.sort((a, b) => new Date(a.gameDate).getTime() - new Date(b.gameDate).getTime());
+      // Sort by UTC date/time
+      allGames.sort((a, b) => new Date(a.gameDateTime) - new Date(b.gameDateTime));
 
       const nextGameByTeam = {};
-
       allGames.forEach(game => {
-        const dateRaw = new Date(game.gameDate + "T00:00:00Z");
-        // Format date like “Jun 05”:
-        const opts = { month: "short", day: "2-digit", timeZone: "UTC" };
-        const dateStr = dateRaw.toLocaleDateString("en-US", opts);
-        // Extract ET time from “gameDateTime” or “gameDate”? Better to take “gameDate” + “gameTime” from game. 
-        // But Stats API returns “gameDate” (YYYY-MM-DD) and “gameTime” in "HH:MM:SSZ" under “gameDate”.
-        // Instead, use “gameDate” + “gameTime” not always present. But `game.officialDate` + `game.teams.*.leagueRecord`... 
-        // Actually, simplest: They include “gameDate” and “gameDateTime” in UTC. We can convert to ET:
-        const utcTime = new Date(game.gameDateTime); 
-        // Eastern Time offset:
-        const timeStr = utcTime.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/New_York" });
+        const utcTime = new Date(game.gameDateTime);
+        const dateStr = utcTime.toLocaleDateString("en-US", { month: "short", day: "2-digit", timeZone: "UTC" });
+        const timeStr = utcTime.toLocaleTimeString("en-US", {
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true,
+          timeZone: "America/New_York"
+        });
 
-        // Home and away teams:
         const home = game.teams.home.team;
         const away = game.teams.away.team;
 
-        // If teamId not recorded yet, record this as their next game:
+        // If team not yet in map, record this as their next game
         [home, away].forEach(teamObj => {
           const tid = teamObj.id;
           if (!nextGameByTeam[tid]) {
             const isHome = (teamObj.id === home.id);
-            const opp = isHome ? away.name : home.name;
-            const venuePart = isHome ? "vs. " : "@ ";
+            const oppName = isHome ? away.name : home.name;
+            const venue = isHome ? "vs. " : "@ ";
             nextGameByTeam[tid] = {
-              display: `${dateStr} ${venuePart}${opp}`,
+              display: `${dateStr} ${venue}${oppName}`,
               rawDate: utcTime.getTime()
             };
           }
@@ -247,9 +242,12 @@
 
     /**
      * Render one division (e.g. "NL East"):
-     *   1. Fetch standings for that division via standings API.
-     *   2. Build nextGameMap (once, if not already).
-     *   3. For each teamRecord, pull team.name, wins, losses, pct, gamesBack, and next game from map.
+     *  1) Fetch all divisions for that leagueId.
+     *  2) Locate the division object where division.name === apiDivision.
+     *  3) Build the Next‐Game map once, if not already built.
+     *  4) For each teamRecord in that division, extract:
+     *       team.name, wins, losses, pct, gamesBack, and nextGame (from map).
+     *  5) Build a 6‐column table: Team | W | L | PCT | GB | Next Game
      */
     async function renderDivision(divisionKey) {
       const container = document.getElementById("standings-container");
@@ -257,29 +255,32 @@
 
       try {
         const { leagueId, apiDivision } = divisionToLeague[divisionKey];
-        // 1. Get all divisions for that league
+
+        // 1) Get all division records for this league
         const records = await fetchStandingsByLeague(leagueId);
-        // 2. Find exactly the division object with matching “division.name”
+
+        // 2) Find the exact division object
         const divRecord = records.find(r => r.division.name === apiDivision);
         if (!divRecord) {
           throw new Error(`No standings found for "${divisionKey}".`);
         }
-        // 3. Build Next Game map
+
+        // 3) Build (or reuse) the Next‐Game map
         const nextGameMap = await buildNextGameMap();
 
-        // 4. Build an array of rows
+        // 4) Create an array of rows
         const rows = divRecord.teamRecords.map(teamRec => {
           const t = teamRec.team;
           const wins = teamRec.wins;
           const losses = teamRec.losses;
           const pct = teamRec.pct;
-          const gb = (teamRec.gamesBack === "-" ? "—" : teamRec.gamesBack);
-          // Lookup next game by team ID
+          const gb = teamRec.gamesBack === "-" ? "—" : teamRec.gamesBack;
+          // Lookup next game by team ID; default to "Off" if no game in next 7 days
           const ng = nextGameMap[t.id]?.display || "Off";
           return { teamName: t.name, wins, losses, pct, gb, nextGame: ng };
         });
 
-        // 5. Build HTML table
+        // 5) Build and insert the table
         const table = document.createElement("table");
         const thead = document.createElement("thead");
         thead.innerHTML = `
@@ -319,9 +320,9 @@
 
     /**
      * Wire up tab clicks:
-     *   • Mark clicked tab “active”
-     *   • Update <h1> text
-     *   • Call renderDivision(...)
+     *  • Remove “active” from all tabs, add to clicked tab
+     *  • Update <h1> to “MLB Standings: [Division]”
+     *  • Call renderDivision(...)
      */
     function setupTabs() {
       const tabs = document.querySelectorAll(".tab");
@@ -337,7 +338,7 @@
       });
     }
 
-    // On initial load, set up tabs and render NL East
+    // On initial load, set up tabs and render NL East by default
     document.addEventListener("DOMContentLoaded", () => {
       setupTabs();
       renderDivision("NL East");
