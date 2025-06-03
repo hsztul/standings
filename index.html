@@ -126,14 +126,13 @@
 
   <script>
     /**
-     * We call the MLB Stats API directly, matching on division.id (not name).
-     * We remove “Next Game” and add “STRK” and “L10” columns.
+     * We call the MLB Stats API directly, matching on division.id.
+     * We removed “Next Game” and added “STRK” and “L10” columns.
+     * The PCT column now uses `tr.leagueRecord.pct` instead of `tr.pct`.
      *
      * • Standings endpoint (regular season):
      *   https://statsapi.mlb.com/api/v1/standings?leagueId={leagueId}&standingsTypes=regularSeason
      *   (leagueId 103 = AL, 104 = NL) 
-     *
-     * • Schedule endpoint (no longer used, since we dropped Next Game).
      *
      * Flow:
      *   1) User clicks a tab (e.g., “NL East” → divisionId=204, leagueId=104).
@@ -141,19 +140,19 @@
      *   3) Find record where r.division.id === divisionId.
      *   4) Extract for each team:
      *        • team.name
-     *        • wins (tr.wins)
-     *        • losses (tr.losses)
-     *        • pct   (tr.pct)
-     *        • gb    (tr.gamesBack, with “—” for leader)
-     *        • STRK  (tr.streak.streakCode, e.g. “W4”, “L1”)
-     *        • L10   (from tr.records.splitRecords where type="lastTen", render “W–L”)
+     *        • wins
+     *        • losses
+     *        • pct (from tr.leagueRecord.pct)
+     *        • gb
+     *        • STRK  (tr.streak.streakCode)
+     *        • L10   (from tr.records.splitRecords where type="lastTen")
      *   5) Build a 7-column HTML table: Team │ W │ L │ PCT │ GB │ STRK │ L10
      *   6) Insert into DOM; horizontally scroll if too wide on mobile.
      */
 
     // Determine leagueId (103 or 104) based on divisionId (200–202 → AL; 203–205 → NL)
     function leagueIdForDivisionId(divisionId) {
-      return (divisionId >= 203) ? 104 : 103;
+      return divisionId >= 203 ? 104 : 103;
     }
 
     // Cache fetched “records” array per leagueId
@@ -161,7 +160,7 @@
 
     /**
      * Fetch “records” for regularSeason standings of a leagueId.
-     * Stores array in standingsCache[leagueId].
+     * Store array in standingsCache[leagueId].
      */
     async function fetchStandingsByLeague(leagueId) {
       if (standingsCache[leagueId]) {
@@ -176,7 +175,7 @@
         throw new Error("Failed to fetch standings");
       }
       const json = await resp.json();
-      standingsCache[leagueId] = json.records; // each record has division.id and teamRecords[]
+      standingsCache[leagueId] = json.records; // array of division objects
       return json.records;
     }
 
@@ -192,7 +191,8 @@
       try {
         const leagueId = leagueIdForDivisionId(divisionId);
         const records = await fetchStandingsByLeague(leagueId);
-        // Find the record whose division.id matches
+
+        // Find record where r.division.id === divisionId
         const divRecord = records.find(r => r.division.id === divisionId);
         if (!divRecord) {
           throw new Error(`No standings found for "${divisionKey}".`);
@@ -203,10 +203,10 @@
           const t     = tr.team;
           const wins  = tr.wins;
           const losses= tr.losses;
-          const pct   = tr.pct;
-          const gb    = (tr.gamesBack === "-" ? "—" : tr.gamesBack);
+          const pct   = tr.leagueRecord.pct; // fixed to use leagueRecord.pct
+          const gb    = tr.gamesBack === "-" ? "—" : tr.gamesBack;
           const strk  = tr.streak.streakCode || ""; // e.g. “W4” or “L1”
-          // Find the splitRecord where type === "lastTen"
+          // Find splitRecord where type === "lastTen"
           const lastTenObj = (tr.records.splitRecords || [])
             .find(sr => sr.type === "lastTen");
           const l10 = lastTenObj ? `${lastTenObj.wins}–${lastTenObj.losses}` : "";
