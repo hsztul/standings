@@ -3,16 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>MLB Standings</title>
+  <title>MLB Standings (BBRef)</title>
   <style>
-    /* ==== BASIC RESET & TYPOGRAPHY ==== */
+    /* ==== RESET & TYPOGRAPHY ==== */
     body {
       margin: 0;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       background-color: #f9f9f9;
       color: #333;
       line-height: 1.4;
-      padding: 0;
     }
     h1 {
       margin: 0;
@@ -70,7 +69,7 @@
     tr:last-child td {
       border-bottom: none;
     }
-    /* ==== MOBILE OPTIMIZATION ==== */
+    /* ==== MOBILE ADJUSTMENTS ==== */
     @media (max-width: 400px) {
       th, td {
         font-size: 0.8rem;
@@ -85,10 +84,16 @@
         padding: 0.8rem;
       }
     }
+    /* ==== LOADING STATE ==== */
+    .loading {
+      text-align: center;
+      padding: 1.5rem;
+      color: #666;
+    }
   </style>
 </head>
 <body>
-  <h1>MLB Standings</h1>
+  <h1>MLB Standings: NL East</h1>
 
   <!-- Division tabs (NL East default) -->
   <div class="tabs" id="division-tabs">
@@ -100,129 +105,161 @@
     <div class="tab" data-division="AL West">AL West</div>
   </div>
 
-  <!-- Container for the standings table -->
-  <div class="standings-container">
-    <table id="standings-table">
-      <thead>
-        <tr>
-          <th>Team</th>
-          <th>W</th>
-          <th>L</th>
-          <th>PCT</th>
-          <th>GB</th>
-        </tr>
-      </thead>
-      <tbody>
-        <!-- Filled by JavaScript -->
-      </tbody>
-    </table>
+  <!-- Container for the standings table or loading message -->
+  <div class="standings-container" id="standings-container">
+    <div class="loading">Loading standings…</div>
   </div>
 
   <script>
-    // ==== MAP FROM OUR TAB LABEL TO API DIVISION NAME ====
+    // Proxying through AllOrigins to avoid CORS errors
+    const PROXY_URL = "https://api.allorigins.win/raw?url=";
+    const BBREF_URL = "https://www.baseball-reference.com/leagues/MLB-standings.shtml";
+
+    // Mapping tab labels to exactly‐matching captions in Baseball‐Reference tables
     const divisionMap = {
-      "NL East":    "National League East",
-      "NL Central": "National League Central",
-      "NL West":    "National League West",
-      "AL East":    "American League East",
-      "AL Central": "American League Central",
-      "AL West":    "American League West"
+      "NL East":    "NL East",
+      "NL Central": "NL Central",
+      "NL West":    "NL West",
+      "AL East":    "AL East",
+      "AL Central": "AL Central",
+      "AL West":    "AL West"
     };
 
-    // Determine leagueId based on division
-    function getLeagueId(divisionKey) {
-      return divisionKey.startsWith("NL") ? 104 : 103;
+    // Cache full scraped HTML text so multiple tab clicks don’t re‐fetch
+    let htmlCache = null;
+
+    /**
+     * Fetches the Baseball-Reference standings page (via proxy), returning raw HTML text.
+     */
+    async function fetchStandingsPage() {
+      if (htmlCache !== null) {
+        return htmlCache;
+      }
+      const resp = await fetch(PROXY_URL + encodeURIComponent(BBREF_URL));
+      if (!resp.ok) {
+        throw new Error("Failed to fetch Baseball-Reference standings page.");
+      }
+      htmlCache = await resp.text();
+      return htmlCache;
     }
 
-    // Cache fetched data so we don't refetch on every tab click in the same session
-    const standingsCache = {};
+    /**
+     * Extracts the plain table rows for a given division (e.g. "NL East") by:
+     *  1. Parsing the full HTML into a DOM.
+     *  2. Finding the <table> whose <caption> exactly matches the division name.
+     *  3. Iterating its <tbody><tr> entries, pulling out Team, W, L, PCT, GB.
+     */
+    async function getDivisionData(divisionKey) {
+      const rawHtml = await fetchStandingsPage();
+      // Parse into a temporary document
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(rawHtml, "text/html");
 
-    // Fetch standings from MLB Stats API for a given league (103 = AL, 104 = NL) :contentReference[oaicite:0]{index=0}
-    async function fetchStandings(leagueId) {
-      if (standingsCache[leagueId]) {
-        return standingsCache[leagueId];
+      // Find the table whose caption text is exactly e.g. "NL East"
+      const tables = Array.from(doc.querySelectorAll("table"));
+      const targetTable = tables.find(tbl => {
+        const caption = tbl.querySelector("caption");
+        return caption && caption.textContent.trim() === divisionMap[divisionKey];
+      });
+
+      if (!targetTable) {
+        throw new Error(`Could not find table for division "${divisionKey}".`);
       }
-      const url = `https://statsapi.mlb.com/api/v1/standings?leagueId=${leagueId}`;
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error("Failed to fetch standings");
-      }
-      const json = await response.json();
-      standingsCache[leagueId] = json.records;
-      return json.records;
+
+      // Build a plain array of rows with only the columns we need
+      const rows = Array.from(targetTable.querySelectorAll("tbody tr"));
+      const data = rows.map(row => {
+        // Team name is in <th data-stat="team_ID">
+        const teamCell = row.querySelector("th[data-stat='team_ID']");
+        const team = teamCell ? teamCell.textContent.trim() : "";
+
+        // Other stats are in <td data-stat="W">, "L", "W_pct", "GB"
+        const wins = row.querySelector("td[data-stat='W']")?.textContent.trim() || "";
+        const losses = row.querySelector("td[data-stat='L']")?.textContent.trim() || "";
+        const pct = row.querySelector("td[data-stat='W_pct']")?.textContent.trim() || "";
+        const gb = row.querySelector("td[data-stat='GB']")?.textContent.trim() || "";
+
+        return { team, wins, losses, pct, gb };
+      });
+
+      return data;
     }
 
-    // Render the table rows for one division
+    /**
+     * Renders a simple table (Team | W | L | PCT | GB) into #standings-container.
+     */
     async function renderDivision(divisionKey) {
-      const tableBody = document.querySelector("#standings-table tbody");
-      tableBody.innerHTML = ""; // clear existing rows
+      const container = document.getElementById("standings-container");
+      container.innerHTML = `<div class="loading">Loading ${divisionKey}…</div>`;
 
-      const apiDivisionName = divisionMap[divisionKey];
-      const leagueId = getLeagueId(divisionKey);
       try {
-        const records = await fetchStandings(leagueId);
-        // Find the record object whose division.name matches our division
-        const divisionRecord = records.find(
-          rec => rec.division.name === apiDivisionName
-        );
-        if (!divisionRecord) {
-          tableBody.innerHTML = `
-            <tr><td colspan="5" style="text-align:center; padding:1rem;">
-              No data found for ${divisionKey}.
-            </td></tr>`;
-          return;
-        }
+        const data = await getDivisionData(divisionKey);
+        // Build table markup
+        const table = document.createElement("table");
+        const thead = document.createElement("thead");
+        thead.innerHTML = `
+          <tr>
+            <th>Team</th>
+            <th>W</th>
+            <th>L</th>
+            <th>PCT</th>
+            <th>GB</th>
+          </tr>
+        `;
+        table.appendChild(thead);
 
-        // Build rows for each teamRecords entry
-        divisionRecord.teamRecords.forEach(teamRec => {
-          const { team, wins, losses, leagueRecord, wildCardGamesBack } = teamRec;
-          // gamesBack is in teamRec.gamesBack; if it's "-" for leader, replace with "—"
-          const gamesBack = teamRec.gamesBack === "-" ? "—" : teamRec.gamesBack;
-          const pct = teamRec.pct;
-          const teamName = team.name;
-
-          const row = document.createElement("tr");
-          row.innerHTML = `
-            <td>${teamName}</td>
-            <td>${wins}</td>
-            <td>${losses}</td>
-            <td>${pct}</td>
-            <td>${gamesBack}</td>
+        const tbody = document.createElement("tbody");
+        data.forEach(row => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${row.team}</td>
+            <td>${row.wins}</td>
+            <td>${row.losses}</td>
+            <td>${row.pct}</td>
+            <td>${row.gb}</td>
           `;
-          tableBody.appendChild(row);
+          tbody.appendChild(tr);
         });
+        table.appendChild(tbody);
+
+        // Replace container content with the new table
+        container.innerHTML = "";
+        container.appendChild(table);
       } catch (err) {
-        tableBody.innerHTML = `
-          <tr><td colspan="5" style="text-align:center; padding:1rem; color:red;">
-            Error loading data.
-          </td></tr>`;
         console.error(err);
+        container.innerHTML = `
+          <div style="text-align:center; padding:1rem; color:red;">
+            Error loading standings for ${divisionKey}.
+          </div>
+        `;
       }
     }
 
-    // Handle tab clicks
+    /**
+     * Set up click handlers on the tabs so that clicking one:
+     *  1. Toggles the "active" class.
+     *  2. Calls renderDivision(...) for that division.
+     *  3. Updates the <h1> to include the division name.
+     */
     function setupTabs() {
       const tabs = document.querySelectorAll(".tab");
       tabs.forEach(tab => {
-        tab.addEventListener("click", async () => {
-          // Deactivate all tabs
+        tab.addEventListener("click", () => {
+          // Deactivate all tabs, activate this one
           tabs.forEach(t => t.classList.remove("active"));
-          // Activate clicked tab
           tab.classList.add("active");
-          // Render corresponding division
+
           const divisionKey = tab.getAttribute("data-division");
-          await renderDivision(divisionKey);
-          // Update table header to include league + division
           document.querySelector("h1").textContent = `MLB Standings: ${divisionKey}`;
+          renderDivision(divisionKey);
         });
       });
     }
 
-    // On initial load, set up tabs and render default (NL East)
-    document.addEventListener("DOMContentLoaded", async () => {
+    // On page load, initialize tabs and show NL East
+    document.addEventListener("DOMContentLoaded", () => {
       setupTabs();
-      await renderDivision("NL East");
-      document.querySelector("h1").textContent = "MLB Standings: NL East";
+      renderDivision("NL East");
     });
   </script>
 </body>
