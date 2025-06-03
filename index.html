@@ -266,7 +266,7 @@
 
       try {
         // 1) Determine leagueId (103 or 104) from divisionId
-        const leagueId = leagueIdForDivisionId(divId);
+        const leagueId = leagueIdForDivisionId(divisionId);
 
         // 2) Fetch all division‐level “records” for that league
         const records = await fetchStandingsByLeague(leagueId);
